@@ -1,5 +1,9 @@
 /*
+ * mod_auth_remote - Remote authentication module for apache httpd 2.2
  *
+ * saju.pillai@gmail.com
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
  */
 #include <apr_strings.h>
 #include <httpd.h>
