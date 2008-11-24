@@ -6,6 +6,7 @@
  * http://www.apache.org/licenses/LICENSE-2.0
  */
 #include <apr_strings.h>
+#include <apr_uri.h>
 #include <httpd.h>
 #include <http_config.h>
 #include <http_log.h>
@@ -32,6 +33,22 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
   return conf;
 }
 
+static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const char *arg)
+{
+  apr_uri_t uri;
+  auth_remote_config_rec *conf = config;
+  apr_status_t rv = apr_uri_parse(cmd->pool, arg, &uri);
+  if (rv != APR_SUCCESS)
+    return "AuthRemoteLocation must be a http uri";
+  if (strncmp(uri.scheme , "http", 4))
+    return "AuthRemoteLocation must be a http uri";
+
+  conf->remote_server = uri.hostname;
+  conf->remote_path = uri.path;
+  conf->remote_port = uri.port_str ? atoi(uri.port_str) : 80;
+  return NULL;
+}
+
 static const command_rec auth_remote_cmds[] = 
   {
     AP_INIT_TAKE1("AuthRemotePort", ap_set_int_slot, 
@@ -43,6 +60,8 @@ static const command_rec auth_remote_cmds[] =
     AP_INIT_TAKE1("AuthRemoteURL", ap_set_string_slot,
 		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_path),
 		  OR_AUTHCFG, "remote server path to authenticate against"),
+    AP_INIT_TAKE1("AuthRemoteLocation", auth_remote_parse_loc, NULL, OR_AUTHCFG,
+		  "full uri for the remote authentication server"),
     {NULL}
   };
 
@@ -113,7 +132,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   if (toupper(rbuf[0]) == 'H' && toupper(rbuf[1]) == 'T' && toupper(rbuf[2]) == 'T' && toupper(rbuf[3]) == 'P' 
-      && toupper(rbuf[8]) == ' ' && toupper(rbuf[9]) == '2') {
+      && rbuf[8] == ' ' && rbuf[9] == '2') {
     return AUTH_GRANTED;
   }
   return AUTH_DENIED;
