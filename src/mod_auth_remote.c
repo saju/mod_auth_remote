@@ -85,6 +85,9 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
 static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const char *arg1, 
 					     const char *arg2, const char *arg3)
 {
+#ifdef AUTH_REMOTE_NO_SALT
+  return "AuthRemoteCookie can only be used if mod_auth_remote is compiled with random() support";
+#else  
   auth_remote_config_rec *conf = config;
   conf->cookie_name = arg1;
   if (arg2)
@@ -97,6 +100,7 @@ static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const
     conf->cookie_life = TWENTY_MINS;
     
   return NULL;
+#endif
 }
 
 static const command_rec auth_remote_cmds[] = 
@@ -112,10 +116,8 @@ static const command_rec auth_remote_cmds[] =
     /* accepts a full url, superceedes AuthRemotePort and AuthRemoteServer */
     AP_INIT_TAKE1("AuthRemoteURL", auth_remote_parse_loc, NULL, OR_AUTHCFG,
 		  "remote server path or full url to authenticate against"),
-#ifndef AUTH_REMOTE_NO_SALT
     AP_INIT_TAKE123("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
 		   "name of the cookie, the cookie path and the duration it is valid for"),
-#endif
     {NULL}
   };
 
