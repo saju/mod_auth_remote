@@ -7,18 +7,27 @@
  */
 #include <apr_strings.h>
 #include <apr_uri.h>
+#include <apr_base64.h>
+#include <apr_md5.h>
+#include <apr_time.h>
 #include <httpd.h>
 #include <http_config.h>
 #include <http_log.h>
 #include <mod_auth.h>
 
-#define NOT_CONFIGURED -42
+#define NOT_CONFIGURED  -42
+#define TWENTY_MINS     1200
 #define DEFAULT_TIMEOUT 5000000
+#define AUTH_REMOTE_COOKIE "auth_remote_cookie"
 
 typedef struct {
-  int remote_port;
-  char *remote_server;
-  char *remote_path;
+  int remote_port;           /* the remote port of the authenticating server */
+  int cookie_life;           /* the duration for which the cookie should live */
+  const char *remote_server;       /* hostname/ip for the remote server */
+  const char *remote_path;         /* the protected resource on the remote server */
+  const char *cookie_name;         /* the name of the cookie */
+  const char *salt;                /* salt for better taste */
+  const char *dir;                 /* directory or location; used to build the cookie path */
 } auth_remote_config_rec;
 
 
@@ -28,8 +37,12 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
 {
   auth_remote_config_rec *conf = apr_palloc(p, sizeof(*conf));
   conf->remote_port = NOT_CONFIGURED;
+  conf->cookie_life = NOT_CONFIGURED;
   conf->remote_server = NULL;
   conf->remote_path = NULL;
+  conf->cookie_name = NULL;
+  conf->salt = NULL;
+  conf->dir = d ? apr_pstrdup(p, d) : NULL;
   return conf;
 }
 
@@ -46,6 +59,18 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
   conf->remote_server = uri.hostname;
   conf->remote_path = uri.path;
   conf->remote_port = uri.port_str ? atoi(uri.port_str) : 80;
+
+  return NULL;
+}
+
+static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const char *arg1, const char *arg2)
+{
+  auth_remote_config_rec *conf = config;
+  conf->cookie_name = arg1;
+  if (arg2) 
+    conf->cookie_life = atoi(arg2);
+  else
+    conf->cookie_life = TWENTY_MINS;
   return NULL;
 }
 
@@ -62,17 +87,90 @@ static const command_rec auth_remote_cmds[] =
 		  OR_AUTHCFG, "remote server path to authenticate against"),
     AP_INIT_TAKE1("AuthRemoteLocation", auth_remote_parse_loc, NULL, OR_AUTHCFG,
 		  "full uri for the remote authentication server"),
+    AP_INIT_TAKE12("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
+		   "name of the cookie and duration it is valid for"),
+    /* hmm maybe the server should gen the salt on per_dir_config create ? */
+    AP_INIT_TAKE1("AuthRemoteSalt", ap_set_string_slot,
+		  (void *)APR_OFFSETOF(auth_remote_config_rec, salt),
+		  OR_AUTHCFG, "salt for the md5 hashing on the cookie"),
     {NULL}
   };
 
-static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd)
+
+static char  *auth_remote_signature(apr_pool_t *p, char *user, apr_int64_t curr, const char *salt)
+{
+  int blen = apr_base64_encode_len(APR_MD5_DIGESTSIZE);
+  unsigned char md5[APR_MD5_DIGESTSIZE];
+  char *md5_b64 = apr_palloc(p, blen);
+  char *s = apr_psprintf(p, "%s:%lld:%s", user, curr, salt);
+
+  apr_md5(md5, s, strlen(s));
+  apr_base64_encode_binary(md5_b64, md5, APR_MD5_DIGESTSIZE);
+  return md5_b64;
+}
+
+static short auth_remote_validate_cookie(request_rec *r, char *exp_user, char *cookie, auth_remote_config_rec *conf)
+{
+  /*
+    our cookie looks like this ...
+    NAME=USER^TSTAMP^MD5(USER:TSTAMP:conf->salt)
+  */
+  apr_time_t new_time = apr_time_sec(apr_time_now());
+  char *payload = apr_pstrdup(r->pool, cookie + strlen(conf->cookie_name) + 1);
+  char *last, *user, *tstamp, *sig, *nsig;
+  apr_int64_t old_time;
+
+  user = apr_strtok(payload, "^", &last);
+  if (!user) {
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"user\" missing from cookie", exp_user);
+    return 0;
+  } else if (strncmp(exp_user, user, strlen(exp_user))) {
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"user\" (%s) mismatch in cookie", exp_user, user);
+    return 0;
+  }
+
+  tstamp = apr_strtok(NULL, "^", &last);
+  if (!tstamp) {
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"tstamp\" missing from cookie", exp_user);
+    return 0;
+  }
+  old_time = apr_atoi64(tstamp);
+  if ((new_time - old_time) > conf->cookie_life) {
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "cookie expired for %s", exp_user);
+    return 0;
+  }
+  
+  sig = apr_strtok(NULL, "^", &last);
+  if (!sig) {
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" missing from cookie", exp_user);
+    return 0;
+  }
+  nsig = auth_remote_signature(r->pool, user, old_time, conf->salt);
+  if (strncmp(sig, nsig, strlen(nsig))) {
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" mismatch in cookie", exp_user);
+    return 0;
+  }
+  return 1;
+}
+
+static void auth_remote_set_cookie(request_rec *r, char *user, auth_remote_config_rec *conf)
+{
+  apr_time_t now = apr_time_sec(apr_time_now());
+  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, auth_remote_signature(r->pool, user, now, conf->salt), conf->dir);
+  apr_table_setn(r->notes, AUTH_REMOTE_COOKIE, cookie);
+  apr_table_addn(r->headers_out, "Set-Cookie", cookie);
+  apr_table_addn(r->err_headers_out, "Set-Cookie", cookie);
+  ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "cookie set - o/p filter configured");
+
+}
+
+static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, auth_remote_config_rec *conf)
 {
   int rz;
   char *remote, *user_pass, *b64_user_pass, *req, *rbuf;
   apr_socket_t *rsock;
   apr_sockaddr_t *addr;
   apr_status_t rv;
-  auth_remote_config_rec *conf = ap_get_module_config(r->per_dir_config, &auth_remote_module);
   
   /* we were not configured */
   if (conf->remote_port == NOT_CONFIGURED) {
@@ -103,7 +201,6 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
 
   /* the http request for the remote end */
   req = apr_psprintf(r->pool, "HEAD %s HTTP/1.0%sAuthorization: Basic %s%s%s", conf->remote_path, CRLF, b64_user_pass, CRLF, CRLF);
-  ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "remote request is %s", req);
 
   /* send the request to the remote server */
   rv = apr_socket_connect(rsock, addr);
@@ -128,7 +225,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   if (rz < 13) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_EGENERAL, r, "non HTTP reply from remote server");
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "non HTTP reply from remote server");
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   if (toupper(rbuf[0]) == 'H' && toupper(rbuf[1]) == 'T' && toupper(rbuf[2]) == 'T' && toupper(rbuf[3]) == 'P' 
@@ -138,9 +235,40 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   return AUTH_DENIED;
 }
 
+static authn_status check_authn(request_rec *r, const char *user, const char *passwd)
+{
+  char *cookies;
+  authn_status remote_status = AUTH_DENIED;
+  auth_remote_config_rec *conf = ap_get_module_config(r->per_dir_config, &auth_remote_module);
+  
+  /* no auth cookie was configured, authn against remote server */
+  if (conf->cookie_life == NOT_CONFIGURED) {
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "cookie is not configured");
+    return do_remote_auth(r, user, passwd, conf);
+  }
+
+  /* cookie is configured, check if a cookie came in */
+  cookies = apr_table_get(r->headers_in, "Cookie");
+  
+  if (cookies) {
+    char *our_cookie = strstr(cookies, conf->cookie_name);
+    if (our_cookie && auth_remote_validate_cookie(r, user, our_cookie, conf))
+      /* our cookie came in and is valid */
+      return AUTH_GRANTED;
+  }
+  
+  /* If our cookie didn't come in or it came in but has expired or we detect user tampering;
+     in all these cases always force a remote authentication and reset the cookie if needed */
+  remote_status = do_remote_auth(r, user, passwd, conf);
+  if (remote_status == AUTH_GRANTED) {
+    auth_remote_set_cookie(r, user, conf);
+  }
+  return remote_status;
+}
+
 static const authn_provider auth_remote_provider =
   {
-    &do_remote_auth,
+    &check_authn,
     NULL
   };
 
