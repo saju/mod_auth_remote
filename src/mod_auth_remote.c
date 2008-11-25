@@ -57,15 +57,28 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
   apr_uri_t uri;
   auth_remote_config_rec *conf = config;
   apr_status_t rv = apr_uri_parse(cmd->pool, arg, &uri);
-  if (rv != APR_SUCCESS)
-    return "AuthRemoteLocation must be a http uri";
-  if (strncmp(uri.scheme , "http", 4))
-    return "AuthRemoteLocation must be a http uri";
+  if (rv != APR_SUCCESS )
+    return "AuthRemoteURL should a URL or path to the authenticating server";
+      
+  if (!uri.scheme) {
+    conf->remote_path = arg;
+  } 
+  else {    
+    if (strncmp(uri.scheme , "http", 4))
+      return "AuthRemoteURL must be a http uri";
 
-  conf->remote_server = uri.hostname;
-  conf->remote_path = uri.path;
-  conf->remote_port = uri.port_str ? atoi(uri.port_str) : 80;
-
+    conf->remote_server = uri.hostname;
+    conf->remote_port = uri.port ? uri.port : 80;
+    if (!uri.path)
+      conf->remote_path = "/";
+    else {
+      conf->remote_path = uri.path;
+      if (uri.query) 
+	conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "?", uri.query, NULL);
+      if (uri.fragment)
+	conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "#", uri.fragment, NULL);
+    }
+  }
   return NULL;
 }
 
@@ -88,17 +101,17 @@ static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const
 
 static const command_rec auth_remote_cmds[] = 
   {
+    /* for backward compatibility */
     AP_INIT_TAKE1("AuthRemotePort", ap_set_int_slot, 
 		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_port),
 		  OR_AUTHCFG, "remote port to authenticate against"),
+    /* for backward compatibility */
     AP_INIT_TAKE1("AuthRemoteServer", ap_set_string_slot, 
 		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_server),
 		  OR_AUTHCFG, "remote server to authenticate against"),
-    AP_INIT_TAKE1("AuthRemoteURL", ap_set_string_slot,
-		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_path),
-		  OR_AUTHCFG, "remote server path to authenticate against"),
-    AP_INIT_TAKE1("AuthRemoteLocation", auth_remote_parse_loc, NULL, OR_AUTHCFG,
-		  "full uri for the remote authentication server"),
+    /* accepts a full url, superceedes AuthRemotePort and AuthRemoteServer */
+    AP_INIT_TAKE1("AuthRemoteURL", auth_remote_parse_loc, NULL, OR_AUTHCFG,
+		  "remote server path or full url to authenticate against"),
 #ifndef AUTH_REMOTE_NO_SALT
     AP_INIT_TAKE123("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
 		   "name of the cookie, the cookie path and the duration it is valid for"),
@@ -247,7 +260,7 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
   const char *cookies;
   authn_status remote_status = AUTH_DENIED;
   auth_remote_config_rec *conf = ap_get_module_config(r->per_dir_config, &auth_remote_module);
-  
+
   /* no auth cookie was configured, authn against remote server */
   if (conf->cookie_life == NOT_CONFIGURED) {
     ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "cookie is not configured");
@@ -258,8 +271,9 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
   cookies = apr_table_get(r->headers_in, "Cookie");
   if (cookies) {
     char *our_cookie = strstr(cookies, conf->cookie_name);
-    if (our_cookie && auth_remote_validate_cookie(r, user, our_cookie, conf))
+    if (our_cookie && auth_remote_validate_cookie(r, user, our_cookie, conf)) {
       return AUTH_GRANTED;
+    }
   }
   
   /** If our cookie 
