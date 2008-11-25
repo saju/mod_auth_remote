@@ -1,0 +1,43 @@
+
+             Mod_Auth_Remote - remote authentication module for apache 2.2
+             Author:  Saju Pillai (saju.pillai@gmail.com)
+                  
+
+  mod_auth_remote is as an authentication provider. mod_auth_remote is configured with an
+  authentication server url. The authentication server url is an application usually hosted
+  by another webserver or webservice which is responsible for the actual authentication of
+  users.
+
+  mod_auth_remote accepts HTTP BASIC authentication requests and proxies a HTTP BASIC 
+  Auth 'HEAD' request to the authentication server url on the local requests behalf.
+  The authentication server may allow or decline authentication based on it's policy. If the 
+  response from the authentication server is a SUCCESS code (2XX), mod_auth_remote will grant 
+  AUTHENTICATION on the local server. For all other responses mod_auth_remote will deny local 
+  AUTHENTICATION.
+
+
+  Using mod_auth_remote gives you the following advantages
+
+  * Simple way to implement Single-Signon. Same set of credentials can be used by 
+    many applications/webservers.
+
+  * No need to replicate your authentication framework to all your applications
+      -- No need to punch holes through your firewall for sql access or ldap access as part of 
+         your authentication setup.
+      -- Authentication server need not be publicly accessible to actual clients
+      -- Tweak your authentication mechanism and ACLs without touching the fronting webservers
+
+  * A single webserver can have different URLs/applications authenticating from many 
+    different authentication servers without duplicating any of their configuration or code.
+
+  * If you use mod_auth_remote's AuthRemoteCookie support you can decrease load on the 
+    authenticating servers drastically, as only 1 backend authentication per session is required.
+
+  This is a complete rewrite of mod_auth_remote specifically for apache 2.2 (& apr 1.3). 
+  I intend to add new functionality only to this version for now.
+
+  Latest dev mod_auth_remote code is at http://github.com/saju/mod_auth_remote/tree/master
+
+  mod_auth_remote for httpd 1.3 and 2.0 can be found at http://saju.pillai.googlepages.com/mod_auth_remote
+
+
