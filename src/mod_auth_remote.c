@@ -20,13 +20,15 @@
 #define DEFAULT_TIMEOUT 5000000
 #define AUTH_REMOTE_COOKIE "auth_remote_cookie"
 
+unsigned char auth_remote_salt[8];
+short want_salt = 0;
+
 typedef struct {
   int remote_port;           /* the remote port of the authenticating server */
   int cookie_life;           /* the duration for which the cookie should live */
   const char *remote_server;       /* hostname/ip for the remote server */
   const char *remote_path;         /* the protected resource on the remote server */
   const char *cookie_name;         /* the name of the cookie */
-  const char *salt;                /* salt for better taste */
   const char *dir;                 /* directory or location; used to build the cookie path */
 } auth_remote_config_rec;
 
@@ -41,8 +43,10 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
   conf->remote_server = NULL;
   conf->remote_path = NULL;
   conf->cookie_name = NULL;
-  conf->salt = NULL;
   conf->dir = d ? apr_pstrdup(p, d) : NULL;
+
+  want_salt = 1;
+
   return conf;
 }
 
@@ -87,17 +91,15 @@ static const command_rec auth_remote_cmds[] =
 		  OR_AUTHCFG, "remote server path to authenticate against"),
     AP_INIT_TAKE1("AuthRemoteLocation", auth_remote_parse_loc, NULL, OR_AUTHCFG,
 		  "full uri for the remote authentication server"),
+#ifndef AUTH_REMOTE_NO_SALT
     AP_INIT_TAKE12("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
 		   "name of the cookie and duration it is valid for"),
-    /* hmm maybe the server should gen the salt on per_dir_config create ? */
-    AP_INIT_TAKE1("AuthRemoteSalt", ap_set_string_slot,
-		  (void *)APR_OFFSETOF(auth_remote_config_rec, salt),
-		  OR_AUTHCFG, "salt for the md5 hashing on the cookie"),
+#endif
     {NULL}
   };
 
 
-static char  *auth_remote_signature(apr_pool_t *p, char *user, apr_int64_t curr, const char *salt)
+static char  *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t curr, unsigned char *salt)
 {
   int blen = apr_base64_encode_len(APR_MD5_DIGESTSIZE);
   unsigned char md5[APR_MD5_DIGESTSIZE];
@@ -109,7 +111,7 @@ static char  *auth_remote_signature(apr_pool_t *p, char *user, apr_int64_t curr,
   return md5_b64;
 }
 
-static short auth_remote_validate_cookie(request_rec *r, char *exp_user, char *cookie, auth_remote_config_rec *conf)
+static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, char *cookie, auth_remote_config_rec *conf)
 {
   /*
     our cookie looks like this ...
@@ -145,7 +147,7 @@ static short auth_remote_validate_cookie(request_rec *r, char *exp_user, char *c
     ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" missing from cookie", exp_user);
     return 0;
   }
-  nsig = auth_remote_signature(r->pool, user, old_time, conf->salt);
+  nsig = auth_remote_signature(r->pool, user, old_time, auth_remote_salt);
   if (strncmp(sig, nsig, strlen(nsig))) {
     ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" mismatch in cookie", exp_user);
     return 0;
@@ -153,15 +155,11 @@ static short auth_remote_validate_cookie(request_rec *r, char *exp_user, char *c
   return 1;
 }
 
-static void auth_remote_set_cookie(request_rec *r, char *user, auth_remote_config_rec *conf)
+static void auth_remote_set_cookie(request_rec *r, const char *user, auth_remote_config_rec *conf)
 {
   apr_time_t now = apr_time_sec(apr_time_now());
-  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, auth_remote_signature(r->pool, user, now, conf->salt), conf->dir);
-  apr_table_setn(r->notes, AUTH_REMOTE_COOKIE, cookie);
-  apr_table_addn(r->headers_out, "Set-Cookie", cookie);
+  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, auth_remote_signature(r->pool, user, now, auth_remote_salt), conf->dir);
   apr_table_addn(r->err_headers_out, "Set-Cookie", cookie);
-  ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "cookie set - o/p filter configured");
-
 }
 
 static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, auth_remote_config_rec *conf)
@@ -237,7 +235,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
 
 static authn_status check_authn(request_rec *r, const char *user, const char *passwd)
 {
-  char *cookies;
+  const char *cookies;
   authn_status remote_status = AUTH_DENIED;
   auth_remote_config_rec *conf = ap_get_module_config(r->per_dir_config, &auth_remote_module);
   
@@ -249,21 +247,46 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
 
   /* cookie is configured, check if a cookie came in */
   cookies = apr_table_get(r->headers_in, "Cookie");
-  
   if (cookies) {
     char *our_cookie = strstr(cookies, conf->cookie_name);
     if (our_cookie && auth_remote_validate_cookie(r, user, our_cookie, conf))
-      /* our cookie came in and is valid */
       return AUTH_GRANTED;
   }
   
-  /* If our cookie didn't come in or it came in but has expired or we detect user tampering;
-     in all these cases always force a remote authentication and reset the cookie if needed */
+  /** If our cookie 
+   *    -> didn't come in -or-
+   *    -> it came in but has expired -or-
+   *    -> we detect user tampering;
+   *  in all these cases always force a remote authentication and reset the cookie if needed 
+   **/
   remote_status = do_remote_auth(r, user, passwd, conf);
   if (remote_status == AUTH_GRANTED) {
     auth_remote_set_cookie(r, user, conf);
   }
   return remote_status;
+}
+
+static int auth_remote_init_module(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptem, server_rec *s)
+{
+  void *was_here;
+  apr_status_t rv;
+
+  if (!want_salt)
+    return OK;
+
+  apr_pool_userdata_get(&was_here, "auth_remote_key", s->process->pool);
+  if (!was_here) {
+    apr_pool_userdata_set((void *)1, "auth_remote_key", apr_pool_cleanup_null, s->process->pool);
+    return OK;
+  }
+
+  rv = apr_generate_random_bytes(auth_remote_salt, sizeof(auth_remote_salt));
+  if (rv != APR_SUCCESS) {
+    ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, "auth_remote: could not generate random salt");
+    return !OK;
+  }
+  ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "secret salt generated");
+  return OK;
 }
 
 static const authn_provider auth_remote_provider =
@@ -274,6 +297,12 @@ static const authn_provider auth_remote_provider =
 
 static void register_hooks(apr_pool_t *p)
 {
+#ifndef AUTH_REMOTE_NO_SALT
+#ifndef APR_HAS_RANDOM
+#error APR random number support is needed to generate secret salt
+#endif
+  ap_hook_post_config(auth_remote_init_module, NULL, NULL, APR_HOOK_MIDDLE);
+#endif
   ap_register_provider(p, AUTHN_PROVIDER_GROUP, "remote", "0", &auth_remote_provider);
 }
 
