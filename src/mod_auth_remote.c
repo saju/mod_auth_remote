@@ -74,14 +74,14 @@ static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const
 {
   auth_remote_config_rec *conf = config;
   conf->cookie_name = arg1;
-  if (arg2) 
-    conf->cookie_life = atoi(arg2);
-  else
-    conf->cookie_life = TWENTY_MINS;
-  if (arg3)
-    conf->cookie_path = arg3;
+  if (arg2)
+    conf->cookie_path = arg2;
   else 
     conf->cookie_path = "/";
+  if (arg3) 
+    conf->cookie_life = atoi(arg3);
+  else
+    conf->cookie_life = TWENTY_MINS;
     
   return NULL;
 }
@@ -101,7 +101,7 @@ static const command_rec auth_remote_cmds[] =
 		  "full uri for the remote authentication server"),
 #ifndef AUTH_REMOTE_NO_SALT
     AP_INIT_TAKE123("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
-		   "name of the cookie, duration it is valid for and the cookie path"),
+		   "name of the cookie, the cookie path and the duration it is valid for"),
 #endif
     {NULL}
   };
