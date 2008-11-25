@@ -5,6 +5,7 @@
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  */
+#include <ctype.h>
 #include <apr_strings.h>
 #include <apr_uri.h>
 #include <apr_base64.h>
@@ -13,6 +14,7 @@
 #include <httpd.h>
 #include <http_config.h>
 #include <http_log.h>
+#include <ap_provider.h>
 #include <mod_auth.h>
 
 #define NOT_CONFIGURED  -42
@@ -24,12 +26,12 @@ unsigned char auth_remote_salt[8];
 short want_salt = 0;
 
 typedef struct {
-  int remote_port;           /* the remote port of the authenticating server */
-  int cookie_life;           /* the duration for which the cookie should live */
+  int remote_port;                 /* the remote port of the authenticating server */
+  int cookie_life;                 /* the duration for which the cookie should live */
   const char *remote_server;       /* hostname/ip for the remote server */
   const char *remote_path;         /* the protected resource on the remote server */
   const char *cookie_name;         /* the name of the cookie */
-  const char *dir;                 /* directory or location; used to build the cookie path */
+  const char *cookie_path;         /* the cookie path */
 } auth_remote_config_rec;
 
 
@@ -43,7 +45,7 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
   conf->remote_server = NULL;
   conf->remote_path = NULL;
   conf->cookie_name = NULL;
-  conf->dir = d ? apr_pstrdup(p, d) : NULL;
+  conf->cookie_path = NULL;
 
   want_salt = 1;
 
@@ -67,7 +69,8 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
   return NULL;
 }
 
-static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const char *arg1, const char *arg2)
+static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const char *arg1, 
+					     const char *arg2, const char *arg3)
 {
   auth_remote_config_rec *conf = config;
   conf->cookie_name = arg1;
@@ -75,6 +78,11 @@ static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const
     conf->cookie_life = atoi(arg2);
   else
     conf->cookie_life = TWENTY_MINS;
+  if (arg3)
+    conf->cookie_path = arg3;
+  else 
+    conf->cookie_path = "/";
+    
   return NULL;
 }
 
@@ -92,8 +100,8 @@ static const command_rec auth_remote_cmds[] =
     AP_INIT_TAKE1("AuthRemoteLocation", auth_remote_parse_loc, NULL, OR_AUTHCFG,
 		  "full uri for the remote authentication server"),
 #ifndef AUTH_REMOTE_NO_SALT
-    AP_INIT_TAKE12("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
-		   "name of the cookie and duration it is valid for"),
+    AP_INIT_TAKE123("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
+		   "name of the cookie, duration it is valid for and the cookie path"),
 #endif
     {NULL}
   };
@@ -115,7 +123,7 @@ static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, c
 {
   /*
     our cookie looks like this ...
-    NAME=USER^TSTAMP^MD5(USER:TSTAMP:conf->salt)
+    NAME=USER^TSTAMP^MD5(USER:TSTAMP:salt)
   */
   apr_time_t new_time = apr_time_sec(apr_time_now());
   char *payload = apr_pstrdup(r->pool, cookie + strlen(conf->cookie_name) + 1);
@@ -158,14 +166,15 @@ static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, c
 static void auth_remote_set_cookie(request_rec *r, const char *user, auth_remote_config_rec *conf)
 {
   apr_time_t now = apr_time_sec(apr_time_now());
-  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, auth_remote_signature(r->pool, user, now, auth_remote_salt), conf->dir);
+  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, 
+			      auth_remote_signature(r->pool, user, now, auth_remote_salt), conf->cookie_path);
   apr_table_addn(r->err_headers_out, "Set-Cookie", cookie);
 }
 
 static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, auth_remote_config_rec *conf)
 {
   int rz;
-  char *remote, *user_pass, *b64_user_pass, *req, *rbuf;
+  char *user_pass, *b64_user_pass, *req, *rbuf;
   apr_socket_t *rsock;
   apr_sockaddr_t *addr;
   apr_status_t rv;
