@@ -1,7 +1,9 @@
 #
 # make sure the correct apxs in your path first - or modify this file to pickup the correct apxs
 #
-APXS=apxs
+RM=rm
+RM_F=$(RM) -f
+APXS=$(shell which apxs apxs2)
 
 all:
 	$(APXS) -i -a -c mod_auth_remote.c
@@ -14,3 +16,7 @@ all:
 #
 no_random:
 	$(APXS) -D AUTH_REMOTE_NO_SALT -i -a -c mod_auth_remote.c
+
+clean:
+	$(RM_F) -r .libs
+	$(RM_F) *.la *.lo *.slo *.o 

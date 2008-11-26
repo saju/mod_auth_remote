@@ -210,7 +210,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to set timeout on socket");
     return HTTP_INTERNAL_SERVER_ERROR;
   }
-  rv = apr_sockaddr_info_get(&addr, conf->remote_server, APR_INET, conf->remote_port, 0, r->pool);
+  rv = apr_sockaddr_info_get(&addr, conf->remote_server, APR_INET, (apr_port_t)conf->remote_port, 0, r->pool);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to setup sockaddr for %s:%d", conf->remote_server, conf->remote_port);
     return HTTP_INTERNAL_SERVER_ERROR;
