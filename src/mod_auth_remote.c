@@ -5,12 +5,12 @@
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  */
-#include <ctype.h>
 #include <apr_strings.h>
 #include <apr_uri.h>
 #include <apr_base64.h>
 #include <apr_md5.h>
 #include <apr_time.h>
+#include <apr_lib.h>
 #include <httpd.h>
 #include <http_config.h>
 #include <http_log.h>
@@ -46,7 +46,7 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
   conf->remote_path = NULL;
   conf->cookie_name = NULL;
   conf->cookie_path = NULL;
-
+  
   want_salt = 1;
 
   return conf;
@@ -58,15 +58,15 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
   auth_remote_config_rec *conf = config;
   apr_status_t rv = apr_uri_parse(cmd->pool, arg, &uri);
   if (rv != APR_SUCCESS )
-    return "AuthRemoteURL should a URL or path to the authenticating server";
-      
+    return "AuthRemoteURL should an URL or path to the authenticating server";
+  
   if (!uri.scheme) {
     conf->remote_path = arg;
   } 
   else {    
     if (strncmp(uri.scheme , "http", 4))
       return "AuthRemoteURL must be a http uri";
-
+    
     conf->remote_server = uri.hostname;
     conf->remote_port = uri.port ? uri.port : 80;
     if (!uri.path)
@@ -74,16 +74,16 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
     else {
       conf->remote_path = uri.path;
       if (uri.query) 
-	conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "?", uri.query, NULL);
+        conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "?", uri.query, NULL);
       if (uri.fragment)
-	conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "#", uri.fragment, NULL);
+        conf->remote_path = apr_pstrcat(cmd->pool, conf->remote_path, "#", uri.fragment, NULL);
     }
   }
   return NULL;
 }
 
 static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const char *arg1, 
-					     const char *arg2, const char *arg3)
+                                             const char *arg2, const char *arg3)
 {
 #ifdef AUTH_REMOTE_NO_SALT
   return "AuthRemoteCookie can only be used if mod_auth_remote is compiled with random() support";
@@ -98,7 +98,7 @@ static const char *auth_remote_config_cookie(cmd_parms *cmd, void *config, const
     conf->cookie_life = atoi(arg3);
   else
     conf->cookie_life = TWENTY_MINS;
-    
+  
   return NULL;
 #endif
 }
@@ -107,34 +107,36 @@ static const command_rec auth_remote_cmds[] =
   {
     /* for backward compatibility */
     AP_INIT_TAKE1("AuthRemotePort", ap_set_int_slot, 
-		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_port),
-		  OR_AUTHCFG, "remote port to authenticate against"),
+                  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_port),
+                  OR_AUTHCFG, "remote port to authenticate against"),
     /* for backward compatibility */
     AP_INIT_TAKE1("AuthRemoteServer", ap_set_string_slot, 
-		  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_server),
-		  OR_AUTHCFG, "remote server to authenticate against"),
+                  (void *)APR_OFFSETOF(auth_remote_config_rec, remote_server),
+                  OR_AUTHCFG, "remote server to authenticate against"),
     /* accepts a full url, superceedes AuthRemotePort and AuthRemoteServer */
     AP_INIT_TAKE1("AuthRemoteURL", auth_remote_parse_loc, NULL, OR_AUTHCFG,
-		  "remote server path or full url to authenticate against"),
+                  "remote server path or full url to authenticate against"),
     AP_INIT_TAKE123("AuthRemoteCookie", auth_remote_config_cookie, NULL, OR_AUTHCFG,
-		   "name of the cookie, the cookie path and the duration it is valid for"),
+                    "name of the cookie, the cookie path and the duration it is valid for"),
     {NULL}
   };
 
 
-static char  *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t curr, unsigned char *salt)
+static char  *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t curr, 
+                                    unsigned char *salt)
 {
   int blen = apr_base64_encode_len(APR_MD5_DIGESTSIZE);
   unsigned char md5[APR_MD5_DIGESTSIZE];
   char *md5_b64 = apr_palloc(p, blen);
   char *s = apr_psprintf(p, "%s:%lld:%s", user, curr, salt);
-
+  
   apr_md5(md5, s, strlen(s));
   apr_base64_encode_binary(md5_b64, md5, APR_MD5_DIGESTSIZE);
   return md5_b64;
 }
 
-static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, char *cookie, auth_remote_config_rec *conf)
+static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, char *cookie, 
+                                         auth_remote_config_rec *conf)
 {
   /*
     our cookie looks like this ...
@@ -147,16 +149,19 @@ static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, c
 
   user = apr_strtok(payload, "^", &last);
   if (!user) {
-    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"user\" missing from cookie", exp_user);
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, 
+                  "%s - tampering(?). \"user\" missing from cookie", exp_user);
     return 0;
   } else if (strncmp(exp_user, user, strlen(exp_user))) {
-    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"user\" (%s) mismatch in cookie", exp_user, user);
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, 
+                  "%s - tampering(?). \"user\" (%s) mismatch in cookie", exp_user, user);
     return 0;
   }
-
+  
   tstamp = apr_strtok(NULL, "^", &last);
   if (!tstamp) {
-    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"tstamp\" missing from cookie", exp_user);
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, 
+                  "%s - tampering(?). \"tstamp\" missing from cookie", exp_user);
     return 0;
   }
   old_time = apr_atoi64(tstamp);
@@ -167,12 +172,14 @@ static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, c
   
   sig = apr_strtok(NULL, "^", &last);
   if (!sig) {
-    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" missing from cookie", exp_user);
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, 
+                  "%s - tampering(?). \"signature\" missing from cookie", exp_user);
     return 0;
   }
   nsig = auth_remote_signature(r->pool, user, old_time, auth_remote_salt);
   if (strncmp(sig, nsig, strlen(nsig))) {
-    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "%s - tampering(?). \"signature\" mismatch in cookie", exp_user);
+    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, 
+                  "%s - tampering(?). \"signature\" mismatch in cookie", exp_user);
     return 0;
   }
   return 1;
@@ -182,24 +189,28 @@ static void auth_remote_set_cookie(request_rec *r, const char *user, auth_remote
 {
   apr_time_t now = apr_time_sec(apr_time_now());
   char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, 
-			      auth_remote_signature(r->pool, user, now, auth_remote_salt), conf->cookie_path);
+                              auth_remote_signature(r->pool, user, now, auth_remote_salt), 
+                              conf->cookie_path);
   apr_table_addn(r->err_headers_out, "Set-Cookie", cookie);
 }
 
-static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, auth_remote_config_rec *conf)
+static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, 
+                                   auth_remote_config_rec *conf)
 {
   int rz;
-  char *user_pass, *b64_user_pass, *req, *rbuf;
+  char *user_pass, *b64_user_pass, *req;
+  unsigned char *rbuf;
   apr_socket_t *rsock;
   apr_sockaddr_t *addr;
   apr_status_t rv;
   
   /* we were not configured */
   if (conf->remote_port == NOT_CONFIGURED) {
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "remote_auth was not configured for uri %s", r->unparsed_uri);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "remote_auth was not configured for uri %s", 
+                  r->unparsed_uri);
     return AUTH_USER_NOT_FOUND;
   }
-
+  
   rv = apr_socket_create(&rsock, APR_INET, SOCK_STREAM, APR_PROTO_TCP, r->pool);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to create socket");
@@ -210,9 +221,11 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to set timeout on socket");
     return HTTP_INTERNAL_SERVER_ERROR;
   }
-  rv = apr_sockaddr_info_get(&addr, conf->remote_server, APR_INET, (apr_port_t)conf->remote_port, 0, r->pool);
+  rv = apr_sockaddr_info_get(&addr, conf->remote_server, APR_INET, (apr_port_t)conf->remote_port, 
+                             0, r->pool);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to setup sockaddr for %s:%d", conf->remote_server, conf->remote_port);
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to setup sockaddr for %s:%d", 
+                  conf->remote_server, conf->remote_port);
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   
@@ -222,12 +235,14 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   apr_base64_encode(b64_user_pass, user_pass, strlen(user_pass));
 
   /* the http request for the remote end */
-  req = apr_psprintf(r->pool, "HEAD %s HTTP/1.0%sAuthorization: Basic %s%s%s", conf->remote_path, CRLF, b64_user_pass, CRLF, CRLF);
+  req = apr_psprintf(r->pool, "HEAD %s HTTP/1.0%sAuthorization: Basic %s%s%s", conf->remote_path, 
+                     CRLF, b64_user_pass, CRLF, CRLF);
 
   /* send the request to the remote server */
   rv = apr_socket_connect(rsock, addr);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to connect to remote server %s:%d", conf->remote_server, conf->remote_port);
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to connect to remote server %s:%d", 
+                  conf->remote_server, conf->remote_port);
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   rz = strlen(req);
@@ -240,7 +255,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   /* read the response from the remote end, 20 bytes should be enough parse the remote server's intent */
   rbuf = apr_palloc(r->pool, rz);
   rz = 20;
-  rv = apr_socket_recv(rsock, rbuf, (apr_size_t *)&rz);
+  rv = apr_socket_recv(rsock, (char *)rbuf, (apr_size_t *)&rz);
   apr_socket_close(rsock);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "recv() from remote server failed");
@@ -250,8 +265,8 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "non HTTP reply from remote server");
     return HTTP_INTERNAL_SERVER_ERROR;
   }
-  if (toupper(rbuf[0]) == 'H' && toupper(rbuf[1]) == 'T' && toupper(rbuf[2]) == 'T' && toupper(rbuf[3]) == 'P' 
-      && rbuf[8] == ' ' && rbuf[9] == '2') {
+  if (apr_toupper(rbuf[0]) == 'H' && apr_toupper(rbuf[1]) == 'T' && apr_toupper(rbuf[2]) == 'T' 
+      && apr_toupper(rbuf[3]) == 'P' && rbuf[8] == ' ' && rbuf[9] == '2') {
     return AUTH_GRANTED;
   }
   return AUTH_DENIED;
@@ -272,7 +287,7 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
   /* cookie is configured, check if a cookie came in */
   cookies = apr_table_get(r->headers_in, "Cookie");
   if (cookies) {
-    char *our_cookie = strstr(cookies, conf->cookie_name);
+    char *our_cookie = ap_strstr((char *)cookies, conf->cookie_name);
     if (our_cookie && auth_remote_validate_cookie(r, user, our_cookie, conf)) {
       return AUTH_GRANTED;
     }
