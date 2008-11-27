@@ -5,6 +5,7 @@
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  */
+
 #include <ctype.h>
 #include <apr_strings.h>
 #include <apr_uri.h>
@@ -16,14 +17,17 @@
 #include <http_log.h>
 #include <ap_provider.h>
 #include <mod_auth.h>
+#include "auth_remote_ssl.h"
 
-#define NOT_CONFIGURED  -42
-#define TWENTY_MINS     1200
-#define DEFAULT_TIMEOUT 5000000
-#define AUTH_REMOTE_COOKIE "auth_remote_cookie"
+#define NOT_CONFIGURED      -42
+#define TWENTY_MINS         1200
+#define DEFAULT_TIMEOUT     5000000
+#define AUTH_REMOTE_COOKIE  "auth_remote_cookie"
 
 unsigned char auth_remote_salt[8];
 short want_salt = 0;
+short init_ssl = 0;
+void *ssl_ctx = NULL;
 
 typedef struct {
   int remote_port;                 /* the remote port of the authenticating server */
@@ -33,7 +37,6 @@ typedef struct {
   const char *cookie_name;         /* the name of the cookie */
   const char *cookie_path;         /* the cookie path */
 } auth_remote_config_rec;
-
 
 module AP_MODULE_DECLARE_DATA auth_remote_module;
 
@@ -291,7 +294,7 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
   return remote_status;
 }
 
-static int auth_remote_init_module(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptem, server_rec *s)
+static int auth_remote_setup_secret(server_rec *s) 
 {
   void *was_here;
   apr_status_t rv;
@@ -314,6 +317,48 @@ static int auth_remote_init_module(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *
   return OK;
 }
 
+static int auth_remote_setup_ssl(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
+{
+  /* 
+     Init OpenSSL only if mod_ssl was not loaded. We should always let mod_ssl init openssl.
+     OpenSSL library cannot be init'd twice.
+  */
+  apr_status_t rv;
+  char *err;
+
+  if (!ap_find_linked_module("mod_ssl.c")) {
+    rv = auth_remote_ssl_init(s, &err);
+    if (rv != APR_SUCCESS) {
+      ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
+      return !OK;
+    }
+  }
+
+  rv = auth_remote_ssl_create_ctx(&ssl_ctx, &err);
+  if (rv != APR_SUCCESS) {
+    ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
+    return !OK;
+  }
+  return rv;
+}
+  
+static int auth_remote_init_module(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
+{
+  int rv = OK;
+#ifndef AUTH_REMOTE_NO_SALT
+#ifndef APR_HAS_RANDOM
+#error APR random number support is needed to generate secret salt
+#endif
+  rv = auth_remote_setup_secret(s);
+  if (rv != OK)
+    return rv;
+#endif
+#ifndef AUTH_REMOTE_NO_SSL
+  rv = auth_remote_setup_ssl(p, plog, ptemp, s);
+#endif
+  return rv;
+}
+
 static const authn_provider auth_remote_provider =
   {
     &check_authn,
@@ -322,12 +367,8 @@ static const authn_provider auth_remote_provider =
 
 static void register_hooks(apr_pool_t *p)
 {
-#ifndef AUTH_REMOTE_NO_SALT
-#ifndef APR_HAS_RANDOM
-#error APR random number support is needed to generate secret salt
-#endif
-  ap_hook_post_config(auth_remote_init_module, NULL, NULL, APR_HOOK_MIDDLE);
-#endif
+  static const char * const pre_run[] = {"mod_ssl.c", NULL};
+  ap_hook_post_config(auth_remote_init_module, pre_run, NULL, APR_HOOK_MIDDLE);
   ap_register_provider(p, AUTHN_PROVIDER_GROUP, "remote", "0", &auth_remote_provider);
 }
 

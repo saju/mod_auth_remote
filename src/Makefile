@@ -4,7 +4,7 @@
 APXS=apxs
 
 all:
-	$(APXS) -i -a -c mod_auth_remote.c
+	$(APXS) -i -a -c -n auth_remote -l crypto -l ssl mod_auth_remote.c ssl.c
 
 #
 # if your apr lib does not have apr_random_* apis
