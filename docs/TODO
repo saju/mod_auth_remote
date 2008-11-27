@@ -1,0 +1,8 @@
+In no particular order
+
+1. Implement enough http client functionality to follow redirects
+2. Support Digest auth backends
+3. Support Form POST backends
+   3.1 Macro expansion in AuthRemoteURL
+4. Support conditional Authorization
+5. Support for https backend
