@@ -1,12 +1,10 @@
 #
 # make sure the correct apxs in your path first - or modify this file to pickup the correct apxs
 #
-RM=rm
-RM_F=$(RM) -f
-APXS=$(shell which apxs apxs2)
+APXS=apxs
 
 all:
-	$(APXS) -i -a -c -n auth_remote -l crypto -l ssl mod_auth_remote.c ssl.c
+	$(APXS) -Wc,-Wall -i -a -c -n auth_remote -l crypto -l ssl mod_auth_remote.c ssl.c plain.c
 
 #
 # if your apr lib does not have apr_random_* apis
@@ -16,7 +14,3 @@ all:
 #
 no_random:
 	$(APXS) -D AUTH_REMOTE_NO_SALT -i -a -c mod_auth_remote.c
-
-clean:
-	$(RM_F) -r .libs
-	$(RM_F) *.la *.lo *.slo *.o 

@@ -16,17 +16,14 @@
 #include <http_log.h>
 #include <ap_provider.h>
 #include <mod_auth.h>
-#include "auth_remote_ssl.h"
+
+#include "auth_remote.h"
 
 #define NOT_CONFIGURED      -42
-#define TWENTY_MINS         1200
-#define DEFAULT_TIMEOUT     5000000
-#define AUTH_REMOTE_COOKIE  "auth_remote_cookie"
 
 unsigned char auth_remote_salt[8];
 short want_salt = 0;
 short init_ssl = 0;
-void *ssl_ctx = NULL;
 
 typedef struct {
   int remote_port;                 /* the remote port of the authenticating server */
@@ -35,40 +32,59 @@ typedef struct {
   const char *remote_path;         /* the protected resource on the remote server */
   const char *cookie_name;         /* the name of the cookie */
   const char *cookie_path;         /* the cookie path */
+  io_abs *io;
+  void *ctx;
 } auth_remote_config_rec;
+
+static apr_array_header_t *dir_config = NULL;
 
 module AP_MODULE_DECLARE_DATA auth_remote_module;
 
 static void *create_auth_remote_dir_config(apr_pool_t *p, char *d) 
 {
   auth_remote_config_rec *conf = apr_palloc(p, sizeof(*conf));
-  conf->remote_port = NOT_CONFIGURED;
-  conf->cookie_life = NOT_CONFIGURED;
+  conf->remote_port   = NOT_CONFIGURED;
+  conf->cookie_life   = NOT_CONFIGURED;
   conf->remote_server = NULL;
-  conf->remote_path = NULL;
-  conf->cookie_name = NULL;
-  conf->cookie_path = NULL;
-  
+  conf->remote_path   = NULL;
+  conf->cookie_name   = NULL;
+  conf->cookie_path   = NULL;
+  conf->io            = NULL;
+  conf->ctx           = NULL;
   want_salt = 1;
 
+  if (!dir_config) {
+    dir_config = apr_array_make(p, 4, sizeof(*conf));
+  }
+  APR_ARRAY_PUSH(dir_config, auth_remote_config_rec *) = conf;
   return conf;
 }
+
 
 static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const char *arg)
 {
   apr_uri_t uri;
   auth_remote_config_rec *conf = config;
-  apr_status_t rv = apr_uri_parse(cmd->pool, arg, &uri);
+  apr_status_t rv;
+  
+  rv = apr_uri_parse(cmd->pool, arg, &uri);
   if (rv != APR_SUCCESS )
-    return "AuthRemoteURL should an URL or path to the authenticating server";
+    return "AuthRemoteURL should be an URL or path to the authenticating server";
   
   if (!uri.scheme) {
+    conf->io = auth_remote_plain_io();
     conf->remote_path = arg;
   } 
   else {    
-    if (strncmp(uri.scheme , "http", 4))
-      return "AuthRemoteURL must be a http uri";
-    
+    if (!strncmp(uri.scheme, "https", 5)) {
+#ifdef AUTH_REMOTE_NO_SSL
+      return "mod_auth_remote is not built with SSL support and cannot process https urls";
+#endif
+    } else if (!strncmp(uri.scheme, "http", 4)) {
+      conf->io = auth_remote_plain_io();
+    } else {
+      return "AuthRemoteURL only accepts http and https urls";
+    }
     conf->remote_server = uri.hostname;
     conf->remote_port = uri.port ? uri.port : 80;
     if (!uri.path)
@@ -124,7 +140,7 @@ static const command_rec auth_remote_cmds[] =
   };
 
 
-static char  *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t curr, 
+static char *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t curr, 
                                     unsigned char *salt)
 {
   int blen = apr_base64_encode_len(APR_MD5_DIGESTSIZE);
@@ -202,9 +218,8 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   int rz;
   char *user_pass, *b64_user_pass, *req;
   unsigned char *rbuf;
-  apr_socket_t *rsock;
-  apr_sockaddr_t *addr;
   apr_status_t rv;
+  void *ctx;
   
   /* we were not configured */
   if (conf->remote_port == NOT_CONFIGURED) {
@@ -212,22 +227,10 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
                   r->unparsed_uri);
     return AUTH_USER_NOT_FOUND;
   }
-  
-  rv = apr_socket_create(&rsock, APR_INET, SOCK_STREAM, APR_PROTO_TCP, r->pool);
+ 
+  rv = conf->io->create(r->pool, conf->ctx, &ctx);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to create socket");
-    return HTTP_INTERNAL_SERVER_ERROR;
-  }
-  rv = apr_socket_timeout_set(rsock, DEFAULT_TIMEOUT);
-  if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to set timeout on socket");
-    return HTTP_INTERNAL_SERVER_ERROR;
-  }
-  rv = apr_sockaddr_info_get(&addr, conf->remote_server, APR_INET, (apr_port_t)conf->remote_port, 
-                             0, r->pool);
-  if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to setup sockaddr for %s:%d", 
-                  conf->remote_server, conf->remote_port);
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, conf->io->error(ctx));
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   
@@ -241,26 +244,25 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
                      CRLF, b64_user_pass, CRLF, CRLF);
 
   /* send the request to the remote server */
-  rv = apr_socket_connect(rsock, addr);
+  rv = conf->io->connect(conf->remote_server, conf->remote_port, ctx);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "failed to connect to remote server %s:%d", 
-                  conf->remote_server, conf->remote_port);
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, conf->io->error(ctx));
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   rz = strlen(req);
-  rv = apr_socket_send(rsock, (const char *)req, (apr_size_t *)&rz);
+  rv = conf->io->write((const char *)req, (apr_size_t *)&rz, ctx);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "write() to remote server failed");
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, conf->io->error(ctx));
     return HTTP_INTERNAL_SERVER_ERROR;
   }
 
   /* read the response from the remote end, 20 bytes should be enough parse the remote server's intent */
   rbuf = apr_palloc(r->pool, rz);
   rz = 20;
-  rv = apr_socket_recv(rsock, (char *)rbuf, (apr_size_t *)&rz);
-  apr_socket_close(rsock);
+  rv = conf->io->read((char *)rbuf, (apr_size_t *)&rz, ctx);
+  conf->io->close(ctx);
   if (rv != APR_SUCCESS) {
-    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "recv() from remote server failed");
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, conf->io->error(ctx));
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   if (rz < 13) {
@@ -310,17 +312,7 @@ static authn_status check_authn(request_rec *r, const char *user, const char *pa
 
 static int auth_remote_setup_secret(server_rec *s) 
 {
-  void *was_here;
   apr_status_t rv;
-
-  if (!want_salt)
-    return OK;
-
-  apr_pool_userdata_get(&was_here, "auth_remote_key", s->process->pool);
-  if (!was_here) {
-    apr_pool_userdata_set((void *)1, "auth_remote_key", apr_pool_cleanup_null, s->process->pool);
-    return OK;
-  }
 
   rv = apr_generate_random_bytes(auth_remote_salt, sizeof(auth_remote_salt));
   if (rv != APR_SUCCESS) {
@@ -334,11 +326,13 @@ static int auth_remote_setup_secret(server_rec *s)
 static int auth_remote_setup_ssl(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
 {
   /* 
-     Init OpenSSL only if mod_ssl was not loaded. We should always let mod_ssl init openssl.
-     OpenSSL library cannot be init'd twice.
-  */
+   * Init OpenSSL only if mod_ssl was not loaded. We should always let mod_ssl init openssl.
+   * OpenSSL library cannot be init'd twice.
+   */
+  int i;
   apr_status_t rv;
   char *err;
+
 
   if (!ap_find_linked_module("mod_ssl.c")) {
     rv = auth_remote_ssl_init(s, &err);
@@ -347,25 +341,44 @@ static int auth_remote_setup_ssl(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *pt
       return !OK;
     }
   }
-
-  rv = auth_remote_ssl_create_ctx(&ssl_ctx, &err);
-  if (rv != APR_SUCCESS) {
-    ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
-    return !OK;
+  
+  /* 
+   * setup ssl ctx for each per dir config record 
+   * at some point we accept configurable ssl options that can be set per dir
+   * that will justify having a per dir ssl ctx instead of a global one 
+   */
+  for (i = 0; i < dir_config->nelts; i++) {
+    void *ctx;
+    auth_remote_config_rec *conf = ((auth_remote_config_rec **)(dir_config->elts))[i];
+    rv = auth_remote_ssl_create_ctx(&ctx, &err);
+    if (rv != APR_SUCCESS) {
+      ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
+      return !OK;
+    }
+    conf->ctx = ctx;
   }
-  return rv;
+  return OK;
 }
   
 static int auth_remote_init_module(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
 {
-  int rv = OK;
+  void *was_here;
+  apr_status_t rv;
+
+  apr_pool_userdata_get(&was_here, "auth_remote_key", s->process->pool);
+  if (!was_here) {
+    apr_pool_userdata_set((void *)1, "auth_remote_key", apr_pool_cleanup_null, s->process->pool);
+    return OK;
+  }
 #ifndef AUTH_REMOTE_NO_SALT
 #ifndef APR_HAS_RANDOM
 #error APR random number support is needed to generate secret salt
 #endif
-  rv = auth_remote_setup_secret(s);
-  if (rv != OK)
-    return rv;
+  if (want_salt) {
+    rv = auth_remote_setup_secret(s);
+    if (rv != OK)
+      return rv;
+  }
 #endif
 #ifndef AUTH_REMOTE_NO_SSL
   rv = auth_remote_setup_ssl(p, plog, ptemp, s);
