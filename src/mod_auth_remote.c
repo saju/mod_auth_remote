@@ -24,6 +24,7 @@
 unsigned char auth_remote_salt[8];
 short want_salt = 0;
 short init_ssl = 0;
+void *ssl_ctx = NULL;
 
 typedef struct {
   int remote_port;                 /* the remote port of the authenticating server */
@@ -35,8 +36,6 @@ typedef struct {
   io_abs *io;
   void *ctx;
 } auth_remote_config_rec;
-
-static apr_array_header_t *dir_config = NULL;
 
 module AP_MODULE_DECLARE_DATA auth_remote_module;
 
@@ -50,13 +49,7 @@ static void *create_auth_remote_dir_config(apr_pool_t *p, char *d)
   conf->cookie_name   = NULL;
   conf->cookie_path   = NULL;
   conf->io            = NULL;
-  conf->ctx           = NULL;
   want_salt = 1;
-
-  if (!dir_config) {
-    dir_config = apr_array_make(p, 4, sizeof(*conf));
-  }
-  APR_ARRAY_PUSH(dir_config, auth_remote_config_rec *) = conf;
   return conf;
 }
 
@@ -80,6 +73,7 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
 #ifdef AUTH_REMOTE_NO_SSL
       return "mod_auth_remote is not built with SSL support and cannot process https urls";
 #endif
+      conf->io = auth_remote_ssl_io();
     } else if (!strncmp(uri.scheme, "http", 4)) {
       conf->io = auth_remote_plain_io();
     } else {
@@ -228,7 +222,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     return AUTH_USER_NOT_FOUND;
   }
  
-  rv = conf->io->create(r->pool, conf->ctx, &ctx);
+  rv = conf->io->create(r->pool, ssl_ctx, &ctx);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, conf->io->error(ctx));
     return HTTP_INTERNAL_SERVER_ERROR;
@@ -343,19 +337,13 @@ static int auth_remote_setup_ssl(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *pt
   }
   
   /* 
-   * setup ssl ctx for each per dir config record 
-   * at some point we accept configurable ssl options that can be set per dir
-   * that will justify having a per dir ssl ctx instead of a global one 
+   * XXX: setup ssl ctx for each per dir config record at some point we 
+   * should accept configurable ssl options that can be set per dir
    */
-  for (i = 0; i < dir_config->nelts; i++) {
-    void *ctx;
-    auth_remote_config_rec *conf = ((auth_remote_config_rec **)(dir_config->elts))[i];
-    rv = auth_remote_ssl_create_ctx(&ctx, &err);
-    if (rv != APR_SUCCESS) {
-      ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
-      return !OK;
-    }
-    conf->ctx = ctx;
+  rv = auth_remote_ssl_create_ctx(&ssl_ctx, &err);
+  if (rv != APR_SUCCESS) {
+    ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, err);
+    return !OK;
   }
   return OK;
 }
