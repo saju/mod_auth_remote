@@ -74,13 +74,14 @@ static const char *auth_remote_parse_loc(cmd_parms *cmd, void *config, const cha
       return "mod_auth_remote is not built with SSL support and cannot process https urls";
 #endif
       conf->io = auth_remote_ssl_io();
+      conf->remote_port = uri.port ? uri.port : 443;
     } else if (!strncmp(uri.scheme, "http", 4)) {
       conf->io = auth_remote_plain_io();
+      conf->remote_port = uri.port ? uri.port : 80;
     } else {
       return "AuthRemoteURL only accepts http and https urls";
     }
     conf->remote_server = uri.hostname;
-    conf->remote_port = uri.port ? uri.port : 80;
     if (!uri.path)
       conf->remote_path = "/";
     else {
