@@ -252,8 +252,8 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   }
 
   /* read the response from the remote end, 20 bytes should be enough parse the remote server's intent */
-  rbuf = apr_palloc(r->pool, rz);
   rz = 20;
+  rbuf = apr_palloc(r->pool, rz);
   rv = conf->io->read((char *)rbuf, (apr_size_t *)&rz, ctx);
   conf->io->close(ctx);
   if (rv != APR_SUCCESS) {
