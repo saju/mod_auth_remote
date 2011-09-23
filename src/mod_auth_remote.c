@@ -197,7 +197,7 @@ static void auth_remote_set_cookie(request_rec *r, const char *user, auth_remote
 static authn_status do_remote_auth(request_rec *r, const char *user, const char *passwd, 
                                    auth_remote_config_rec *conf)
 {
-  int rz;
+  apr_size_t rz;
   char *user_pass, *b64_user_pass, *req;
   unsigned char *rbuf;
   apr_socket_t *rsock;
@@ -246,7 +246,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
     return HTTP_INTERNAL_SERVER_ERROR;
   }
   rz = strlen(req);
-  rv = apr_socket_send(rsock, (const char *)req, (apr_size_t *)&rz);
+  rv = apr_socket_send(rsock, (const char *)req, &rz);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "write() to remote server failed");
     return HTTP_INTERNAL_SERVER_ERROR;
@@ -255,7 +255,7 @@ static authn_status do_remote_auth(request_rec *r, const char *user, const char 
   /* read the response from the remote end, 20 bytes should be enough parse the remote server's intent */
   rbuf = apr_palloc(r->pool, rz);
   rz = 20;
-  rv = apr_socket_recv(rsock, (char *)rbuf, (apr_size_t *)&rz);
+  rv = apr_socket_recv(rsock, (char *)rbuf, &rz);
   apr_socket_close(rsock);
   if (rv != APR_SUCCESS) {
     ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "recv() from remote server failed");
