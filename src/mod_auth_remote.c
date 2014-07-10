@@ -128,7 +128,7 @@ static char  *auth_remote_signature(apr_pool_t *p, const char *user, apr_int64_t
   int blen = apr_base64_encode_len(APR_MD5_DIGESTSIZE);
   unsigned char md5[APR_MD5_DIGESTSIZE];
   char *md5_b64 = apr_palloc(p, blen);
-  char *s = apr_psprintf(p, "%s:%lld:%s", user, curr, salt);
+  char *s = apr_psprintf(p, "%s:%" APR_TIME_T_FMT ":%s", user, curr, salt);
   
   apr_md5(md5, s, strlen(s));
   apr_base64_encode_binary(md5_b64, md5, APR_MD5_DIGESTSIZE);
@@ -188,7 +188,7 @@ static short auth_remote_validate_cookie(request_rec *r, const char *exp_user, c
 static void auth_remote_set_cookie(request_rec *r, const char *user, auth_remote_config_rec *conf)
 {
   apr_time_t now = apr_time_sec(apr_time_now());
-  char *cookie = apr_psprintf(r->pool, "%s=%s^%lld^%s;path=%s", conf->cookie_name, user, now, 
+  char *cookie = apr_psprintf(r->pool, "%s=%s^%" APR_TIME_T_FMT "^%s;path=%s", conf->cookie_name, user, now, 
                               auth_remote_signature(r->pool, user, now, auth_remote_salt), 
                               conf->cookie_path);
   apr_table_addn(r->err_headers_out, "Set-Cookie", cookie);
